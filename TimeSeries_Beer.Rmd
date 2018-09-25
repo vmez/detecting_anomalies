@@ -1,0 +1,180 @@
+---
+title: "Detecting Anomalies in Time Series"
+author: "Violeta Mezeklieva"
+date: "July 31, 2018"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: journal
+---
+
+### Working with Time:
+When you work for the first time with Time Series, there are layers of initial complication to something that appears so simple as changing the class of the column Time. And don't mind the multiple ways you can transform and extract time from libraries base, zoo, lubridate, data.table...
+
+After several trial and error, time consuming approaches and internet searches, I found out the fastest way to convert a column containing only month and year is to use the function **as.yearmon** in the **zoo** package. It's super fast. 
+
+If you want to extract day, week, month, year I highly recommend using **floor_date** from the package **lubridate.** The ouput will be a column with week for example, extracted from the column Date just as it would be with other packages. The difference however, is that **floor_date** preserves the Date format in that cell, and remains a Date format even after doing operations that require group_by() %>% summarize() from **dplyr**. Go ahead and try it our yourself. Exract month, then group_by('x') and see if the output is still in Date format. And then try to do the same with **floor_date**. Way more efficient.
+
+
+If you have a column containing information with Date and Time in the same cell,I highly recommend using **parse_date_time** from the package **lubridate**. For example: 
+
+> data $ DateTime <- parse_date_time( data$DateTime, orders = "dmy HMS")
+
+This function also takes into account Dailight Savings and structures the data without including _NA_ for the 'non-existing' time eaten by the time-change when it occured. 
+
+
+### Time Series is useful:
+Everything we analyze has a time component. It is therefore interesting to analyze more carefully the information Time provides to improve our understanding of the context to be forecasted.
+
+If you deconstruct Time, you find three main components that define it: trend, seasonality, cycle. Each of these patterns can be studied individually to better understand the data we are analysing. 
+
+There are several methods - I won't get into it but a great reference is [this eBook](https://otexts.org/fpp2/index.html) by Rob J Hyndman - the creator of the Forecast package. It explains extensively how to Decompose Time Series, why it is important to do so, and how do the algorithms work.
+
+
+### Big News for Forecast:
+Yesterday I stumbled upon a freshly-out-of-the-oven package from April 2018 called **Anomalize**. This is exactly what I was missing in my previous Time Series Project: A package that detects anomalies. 
+
+It was Twitter actually, who built a first version of an algorithm because they wanted to detect events such as increased web traffic or malfunctioning of their servers with more granularity.
+
+You can read more [about the creators here](http://www.business-science.io/code-tools/2018/04/08/introducing-anomalize.html)
+
+###Brief Time Series demo:
+I will be using a dataset from the Bureau of Statistics of Australia containing information on monthly beer production. You can find it [here](https://datamarket.com/data/set/22xr/monthly-beer-production-in-australia-megalitres-includes-ale-and-stout-does-not-include-beverages-with-alcohol-percentage-less-than-115-jan-1956-aug-1995#!ds=22xr&display=line)
+
+
+#### Required packages:
+```{r, include=FALSE}
+library(knitr)
+```
+```{r}
+pacman::p_load(dplyr, anomalize, zoo, ggplot2, forecast)
+```
+```{r "setup", include=FALSE}
+opts_knit$set(root.dir = "C:/Users/Violeta/Documents/Ubiqum/Projects/Beer_Australia")
+```
+**_fread_** _loads large datasets significantly faster_
+
+```{r}
+beer <- data.table::fread("beer_australia.csv", header = F, sep = ";")
+```
+
+```{r}
+str(beer)
+```
+
+
+The first row we can erase because it contains a lengthy text we don't need in the analysis.
+We will then need to convert V1 to a Date format, and V2 to numeric.
+
+We will also change the column names for improved workflow:
+
+
+```{r}
+beer <- beer[-1]
+names(beer) <- c("Date", "Volume")
+beer$Date <- as.yearmon(beer$Date)
+beer$Volume <- as.numeric(beer$Volume)
+```
+```{r}
+summary(beer)
+```
+
+
+###Creating Time Series with ggplot2:
+
+We create a monthly time series by defining the time-frame (frequency) to 12 and we define the start and end days by choosing the year and month part of that series.
+
+
+```{r}
+beer_ts <- ts(beer$Volume, frequency = 12, start = c(1956,1), end = c(1995,8))
+```
+
+
+We use autoplot to visualize the monthly production. 
+
+
+```{r}
+autoplot(beer_ts) + ggtitle("Montly Trend", subtitle = "Australian Beer Production in megalitres") + labs(x = "", y ="") + theme_minimal()
+```
+
+
+Seeing the monthly trend is useful to understand the initial trend. 
+We are also interested in observing if there is seasonality in the data to take into account when building our forecast:
+
+
+```{r}
+ggseasonplot(beer_ts, year.labels = F, continuous = T) + ggtitle("Yearly Trend", subtitle = "Australian Beer Production in megalitres") + labs(x = "", y = "") + theme_minimal()
+```
+
+
+It is a bit hard to see the seasonal patterns and changes. To zoom in, we can use the code bellow to see more clearly the changes of beer production overtime.
+
+
+```{r}
+ggsubseriesplot(beer_ts) + ggtitle("Seasonal Patterns and Changes", subtitle = "Australian Beer Production in megalitres") + labs(x = "", y = "") + theme_minimal() 
+```
+
+
+The ggplot commands are useful to look for seasonality patterns, to understand them and build our TimeSeries Models accordingly. 
+
+
+###Let's put the package in use:
+
+Now comes the good part, the package that pushed me to create this tutorial, detects and plots anomalies in the given time series.
+
+We first need to convert our data to tibble.
+
+```{r}
+beer_tbl <- as_tibble(beer)
+```
+
+
+Then we can decompose the time series, and search for anomalies based on the remainder - measured from substracting observations from the season and trend. We can change the maximum anomalies parameter if needed. The default setting is set to detect anomalies for 20% of the data.
+
+
+```{r}
+beer_tbl %>% time_decompose(Volume, method = "stl") %>%
+  anomalize(remainder, method = "gesd", max_anoms = 0.2) %>%
+  time_recompose()
+```
+
+
+We can filter the results to find the anmalies, or we can plot them.
+
+
+```{r}
+beer_tbl %>%
+  time_decompose(Volume, method = "stl") %>%
+  anomalize(remainder, method = "gesd", max_anoms = 0.2) %>%
+  time_recompose() %>%
+  plot_anomalies(color_yes = "red") + 
+  ggtitle("Anomalies Observed Overtime",
+          subtitle = "Australian Beer Production in megalitres")
+```
+
+
+We can also detect anomalies in the decomposed time series.
+
+
+```{r}
+beer_tbl %>% 
+  time_decompose(Volume, method = "stl") %>% 
+  anomalize(remainder, method = "gesd", max_anoms = 0.2) %>% 
+  time_recompose() %>% 
+  plot_anomaly_decomposition(alpha_dots = 0.5, size_circles = 6, color_yes = "red") +
+  ggtitle("Detecting Anomalies",
+          subtitle = "Decomposed Time Series")
+```
+
+
+I find this package to be a great companion to the Forecast package. It allows for greater depth analysis and data exploration. Both very important stages before building predictive models. Otherwise, how can you interpret the results, and proceede by improving your model?
+
+Results are created from historical data - so it is important to understand what happened.
+
+
+
+
+
+
+
